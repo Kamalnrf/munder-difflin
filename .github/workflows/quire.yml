@@ -1,5 +1,9 @@
-name: Quire · Re-check a fixed issue on main
+name: Quire · main
 
+# What Quire checks on main. Today that is one thing: an issue the merged pull request
+# claimed to fix gets re-checked on main's own build. Anything else main should answer
+# for belongs in this file too.
+#
 # A Trail's main lane is what anyone reading it later sees first, and until something
 # runs there it keeps the last answer it was given. Triage answers it from main's build
 # ("this reproduces"); verification answers the pull request's own lane ("the fix
