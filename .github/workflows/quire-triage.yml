@@ -287,15 +287,27 @@ jobs:
             const rest = lines.slice(cursor).join('\n').trim()
               .replace(/^(#{1,4})\s/gm, (_, h) => `${'#'.repeat(Math.min(6, h.length + 2))} `);
 
+            // Whether the report reproduced is the whole point of the Run, and "1 failed"
+            // is the least direct way to say it. Quire's own tally ("1 reproduced") is
+            // preferred; the check counts are the fallback when it words things otherwise.
+            const reproduced = /(\d+)\s+reproduced\b/i.exec(handoff);
+            const verdict = e.STATUS !== 'completed'
+              ? `Run did not complete (\`${e.STATUS}\`)`
+              : (reproduced && Number(reproduced[1]) > 0) || Number(e.FAILED) > 0
+                ? 'Reproduced'
+                : Number(e.BLOCKED) > 0
+                  ? 'Could not check'
+                  : 'Did not reproduce';
+
             // A comment caps at 65536 characters; the Run link holds the full evidence.
             const room = 55000;
             const body = [
+              title ? `### ${verdict} · ${title}` : `### ${verdict}`,
+              ...(summary.length ? ['', summary.join(' ')] : []),
               // One link, not two: the handoff's own footer inside the fold already
               // carries the Trail, and the Run is what a reader wants first.
-              e.STATUS === 'completed'
-                ? `**Quire triage** · ${e.PASSED} passed · ${e.FAILED} failed · ${e.BLOCKED} blocked · [Run](${e.WEB_URL})`
-                : `**Quire triage** · Run did not complete (\`${e.STATUS}\`) · [Run](${e.WEB_URL})`,
-              ...(title ? ['', `**${title}** — ${summary.join(' ')}`] : []),
+              '',
+              `${e.PASSED} passed · ${e.FAILED} failed · ${e.BLOCKED} blocked · [Run](${e.WEB_URL})`,
               ...(rest ? [
                 '',
                 '<details><summary>Checks, evidence and how it was set up</summary>',
@@ -307,7 +319,7 @@ jobs:
                 '</details>',
               ] : []),
               '',
-              '_Apply `triage` or `quire` to run again._',
+              '_Quire triage · apply `triage` or `quire` to run again._',
             ].join('\n');
 
             await core.summary.addRaw(body).write();
