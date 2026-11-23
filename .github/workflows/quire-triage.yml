@@ -3,10 +3,11 @@ name: Quire · Triage an issue
 # Gives a bug report an independent reproduction attempt with evidence, so triage starts
 # from what the app actually does rather than from a guess.
 #
-# Applying the `quire` label is what runs it, on a fresh report or a tenth re-check alike.
-# The label is removed afterwards, so applying it again runs it again. Nothing triages
-# automatically on arrival: each Run is spend, and whoever reads the issue decides it is
-# worth one.
+# Applying `triage` or `quire` is what runs it, on a fresh report or a tenth re-check
+# alike. Either reads naturally depending on whether you are thinking about the job or
+# the tool. Whichever one you applied is removed afterwards, so applying it again runs it
+# again. Nothing triages automatically on arrival: each Run is spend, and whoever reads
+# the issue decides it is worth one.
 #
 # Needs Issues enabled on this repository, plus the QUIRE_API_TOKEN secret. Each triaged
 # issue is one Quire Run.
@@ -31,21 +32,23 @@ on:
 permissions: {}
 
 concurrency:
-  # Applying `quire` again replaces the Run still in flight for that issue. Every other
-  # label fires this workflow too, so those runs need a group of their own: sharing the
-  # per-issue one would cancel a live Run and then skip the job that reports it.
+  # Applying a trigger label again replaces the Run still in flight for that issue. Every
+  # other label fires this workflow too, so those runs need a group of their own: sharing
+  # the per-issue one would cancel a live Run and then skip the job that reports it.
   group: >-
-    ${{ github.event_name == 'issues' && github.event.label.name != 'quire'
+    ${{ github.event_name == 'issues'
+        && !contains(fromJSON('["triage","quire"]'), github.event.label.name)
         && format('quire-triage-ignored-{0}', github.run_id)
         || format('quire-triage-{0}', github.event.issue.number || github.event.inputs.issue) }}
   cancel-in-progress: true
 
 jobs:
   triage:
-    # Only the `quire` label starts a Run, so the other labels people apply while sorting
+    # Only a trigger label starts a Run, so the other labels people apply while sorting
     # the backlog cost nothing. A dispatch skips the label entirely.
     if: >-
-      ${{ github.event_name != 'issues' || github.event.label.name == 'quire' }}
+      ${{ github.event_name != 'issues'
+          || contains(fromJSON('["triage","quire"]'), github.event.label.name) }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
@@ -303,7 +306,7 @@ jobs:
                 '</details>',
               ] : []),
               '',
-              '_Apply `quire` to run again._',
+              '_Apply `triage` or `quire` to run again._',
             ].join('\n');
 
             await core.summary.addRaw(body).write();
@@ -312,12 +315,16 @@ jobs:
             });
 
   # The label is a button, not a state, so it has to clear even when the Run never
-  # produced a verdict: a failed start would otherwise leave `quire` set, and applying a
-  # label that is already there fires nothing. Separate and terminal, so a failure
-  # anywhere above still reaches it, and only the run that the label triggered clears it.
+  # produced a verdict: a failed start would otherwise leave it set, and applying a label
+  # that is already there fires nothing. Separate and terminal, so a failure anywhere
+  # above still reaches it. It clears the label that actually triggered this run, and
+  # only for a run a trigger label started -- otherwise an unrelated label event would
+  # strip one belonging to a different, still-pending Run.
   clear-label:
     needs: [triage, report]
-    if: ${{ always() && github.event_name == 'issues' && github.event.label.name == 'quire' }}
+    if: >-
+      ${{ always() && github.event_name == 'issues'
+          && contains(fromJSON('["triage","quire"]'), github.event.label.name) }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -326,8 +333,10 @@ jobs:
       - uses: actions/github-script@v7
         env:
           NUMBER: ${{ github.event.issue.number }}
+          LABEL: ${{ github.event.label.name }}
         with:
           script: |
+            const { NUMBER, LABEL } = process.env;
             await github.rest.issues.removeLabel({
-              ...context.repo, issue_number: Number(process.env.NUMBER), name: 'quire',
-            }).catch((error) => core.info(`No quire label to remove: ${error.message}`));
+              ...context.repo, issue_number: Number(NUMBER), name: LABEL,
+            }).catch((error) => core.info(`No ${LABEL} label to remove: ${error.message}`));
