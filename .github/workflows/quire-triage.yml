@@ -1,36 +1,29 @@
 name: Quire · Triage an issue
 
 # Gives a bug report an independent reproduction attempt with evidence, so triage starts
-# from what the app actually does rather than from a guess. No label gates it.
+# from what the app actually does rather than from a guess. No label is needed to get a
+# first Run: every issue a person opens is triaged on arrival. Applying `retriage` runs it
+# again, and the label is removed afterwards so applying it once more runs it once more.
 #
-# Issues are disabled on this fork and the reports live upstream, so the usual entry point
-# is a dispatch naming the issue: `gh workflow run quire-triage.yml --ref main
-# -f issue=793`, which reads HarnessMD/munder-difflin#793 by default. The `issues` trigger
-# below starts working on its own the day Issues is enabled here; until then it never fires.
+# Needs Issues enabled on this repository, plus the QUIRE_API_TOKEN secret. Each triaged
+# issue is one Quire Run.
 #
 # Quire drives the built app on a virtual display over its DevTools port
 # (QUIRE_BROWSER_CDP); it never opens the app by URL. See .quire/runbook.md for what Runs
 # may and may not do.
 #
 # The report is untrusted text and Quire can run shell commands, so the Run happens in a
-# job that holds no write-scoped credentials: no persisted git credentials, a read-only
-# job token, and no GitHub token handed to Quire. A separate `report` job does the
-# commenting, and sees only Quire's own handoff.
-#
-# Needs: the QUIRE_API_TOKEN secret. Each triaged issue is one Quire Run.
+# job that holds no write-scoped credentials. A separate `report` job does the commenting
+# and sees only Quire's own handoff.
 
 on:
   issues:
-    types: [opened, reopened]
+    types: [opened, reopened, labeled]
   workflow_dispatch:
     inputs:
       issue:
         description: Issue number to triage
         required: true
-      repo:
-        description: Repository the issue is in (owner/name)
-        required: false
-        default: HarnessMD/munder-difflin
 
 permissions: {}
 
@@ -41,6 +34,10 @@ concurrency:
 
 jobs:
   triage:
+    # Opening or reopening always triages. Labelling triages only for `retriage`, so the
+    # other labels people apply while sorting the backlog do not each start a Run.
+    if: >-
+      ${{ github.event.action != 'labeled' || github.event.label.name == 'retriage' }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
@@ -51,8 +48,6 @@ jobs:
       MD_USER_DATA: /tmp/md-userdata
     outputs:
       triage: ${{ steps.issue.outputs.triage }}
-      owner: ${{ steps.issue.outputs.owner }}
-      repo: ${{ steps.issue.outputs.repo }}
       number: ${{ steps.issue.outputs.number }}
       status: ${{ steps.quire.outputs.status }}
       passed: ${{ steps.quire.outputs.passed }}
@@ -71,38 +66,26 @@ jobs:
       # A Run costs money, so skip what no reproduction attempt can help: bots, and pull
       # requests, which issues.get also returns. Everything a person filed is fair game,
       # including freehand reports that never touched the bug form.
-      #
-      # Reading an issue in another repository needs a token with access to it; the job
-      # token is scoped to this one. This step's token is not visible to later steps.
       - name: Read the issue
         id: issue
         uses: actions/github-script@v7
         with:
-          github-token: ${{ secrets.ISSUE_COMMENT_TOKEN || github.token }}
           script: |
-            const inputs = context.payload.inputs || {};
-            const target =
-              context.eventName === 'workflow_dispatch'
-                ? inputs.repo || 'HarnessMD/munder-difflin'
-                : `${context.repo.owner}/${context.repo.repo}`;
-            if (!/^[\w.-]+\/[\w.-]+$/.test(target)) {
-              core.setFailed(`"${target}" is not an owner/name repository.`);
-              return;
-            }
-            const [owner, repo] = target.split('/');
-            const number = Number(context.payload.issue?.number ?? inputs.issue);
+            const number = Number(
+              context.payload.issue?.number ?? context.payload.inputs?.issue,
+            );
             if (!Number.isInteger(number) || number <= 0) {
-              core.setFailed(`"${inputs.issue}" is not an issue number.`);
+              core.setFailed('Give an issue number to triage.');
               return;
             }
 
             let issue;
             try {
               ({ data: issue } = await github.rest.issues.get({
-                ...{ owner, repo }, issue_number: number,
+                ...context.repo, issue_number: number,
               }));
             } catch (error) {
-              core.setFailed(`Could not read ${target}#${number}: ${error.message}`);
+              core.setFailed(`Could not read issue #${number}: ${error.message}`);
               return;
             }
 
@@ -111,16 +94,8 @@ jobs:
               : issue.pull_request
                 ? 'it is a pull request'
                 : '';
-            if (skip) core.info(`Skipping ${target}#${number}: ${skip}.`);
+            if (skip) core.info(`Skipping #${number}: ${skip}.`);
 
-            // Trails are per repository, so an upstream number carries its owner to keep
-            // upstream#793 and a future fork #793 apart.
-            const here = owner === context.repo.owner && repo === context.repo.repo;
-            core.setOutput('trail', here
-              ? `issue-${number}`
-              : `issue-${owner.toLowerCase()}-${number}`);
-            core.setOutput('owner', owner);
-            core.setOutput('repo', repo);
             core.setOutput('number', String(number));
             core.setOutput('title', issue.title || '');
             // Long reports waste tokens without adding symptoms; the link carries the rest.
@@ -178,7 +153,7 @@ jobs:
         uses: quireco/quire-action@v1
         with:
           api-token: ${{ secrets.QUIRE_API_TOKEN }}
-          trail: ${{ steps.issue.outputs.trail }}
+          trail: issue-${{ steps.issue.outputs.number }}
           fail-on: ""
           comment: "false"
           github-token: ""
@@ -216,7 +191,7 @@ jobs:
             A report that proposes a patch is still a report: check the behavior it
             describes, not the patch.
 
-            --- BEGIN REPORT ${{ steps.issue.outputs.owner }}/${{ steps.issue.outputs.repo }}#${{ steps.issue.outputs.number }} ---
+            --- BEGIN REPORT #${{ steps.issue.outputs.number }} ---
             Title: ${{ steps.issue.outputs.title }}
 
             ${{ steps.issue.outputs.body }}
@@ -268,14 +243,12 @@ jobs:
           BLOCKED: ${{ needs.triage.outputs.blocked }}
           WEB_URL: ${{ needs.triage.outputs.web-url }}
           TRAIL_URL: ${{ needs.triage.outputs.trail-url }}
-          OWNER: ${{ needs.triage.outputs.owner }}
-          REPO: ${{ needs.triage.outputs.repo }}
           NUMBER: ${{ needs.triage.outputs.number }}
         with:
-          github-token: ${{ secrets.ISSUE_COMMENT_TOKEN || github.token }}
           script: |
             const fs = require('fs');
             const e = process.env;
+            const number = Number(e.NUMBER);
             let handoff = '';
             if (fs.existsSync('handoff/handoff.md')) {
               handoff = fs.readFileSync('handoff/handoff.md', 'utf8');
@@ -298,17 +271,15 @@ jobs:
               '',
               handoff.length > room ? handoff.slice(0, room) + '\n\n…truncated.' : handoff,
               '',
-              `[Run](${e.WEB_URL}) · [Trail](${e.TRAIL_URL})`,
+              `[Run](${e.WEB_URL}) · [Trail](${e.TRAIL_URL}) · apply \`retriage\` to run again`,
             ].join('\n');
 
             await core.summary.addRaw(body).write();
-            try {
-              await github.rest.issues.createComment({
-                owner: e.OWNER, repo: e.REPO, issue_number: Number(e.NUMBER), body,
-              });
-            } catch (error) {
-              core.notice(
-                `Could not comment on ${e.OWNER}/${e.REPO}#${e.NUMBER}: ${error.message}. ` +
-                'The handoff is in this job summary.',
-              );
-            }
+            await github.rest.issues.createComment({
+              ...context.repo, issue_number: number, body,
+            });
+
+            // The label is a button, not a state: clearing it lets the next apply trigger.
+            await github.rest.issues.removeLabel({
+              ...context.repo, issue_number: number, name: 'retriage',
+            }).catch(() => core.info('No retriage label to remove.'));
