@@ -100,6 +100,9 @@ jobs:
 
   verify:
     needs: plan
+    # Without this the checks list shows the whole matrix entry, issue title included,
+    # which reads like a sentence rather than a check name.
+    name: verify · ${{ matrix.trail }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
