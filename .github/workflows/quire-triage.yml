@@ -249,7 +249,6 @@ jobs:
           FAILED: ${{ needs.triage.outputs.failed }}
           BLOCKED: ${{ needs.triage.outputs.blocked }}
           WEB_URL: ${{ needs.triage.outputs.web-url }}
-          TRAIL_URL: ${{ needs.triage.outputs.trail-url }}
           NUMBER: ${{ needs.triage.outputs.number }}
         with:
           script: |
@@ -291,8 +290,10 @@ jobs:
             // A comment caps at 65536 characters; the Run link holds the full evidence.
             const room = 55000;
             const body = [
+              // One link, not two: the handoff's own footer inside the fold already
+              // carries the Trail, and the Run is what a reader wants first.
               e.STATUS === 'completed'
-                ? `**Quire triage** · ${e.PASSED} passed · ${e.FAILED} failed · ${e.BLOCKED} blocked · [Run](${e.WEB_URL}) · [Trail](${e.TRAIL_URL})`
+                ? `**Quire triage** · ${e.PASSED} passed · ${e.FAILED} failed · ${e.BLOCKED} blocked · [Run](${e.WEB_URL})`
                 : `**Quire triage** · Run did not complete (\`${e.STATUS}\`) · [Run](${e.WEB_URL})`,
               ...(title ? ['', `**${title}** — ${summary.join(' ')}`] : []),
               ...(rest ? [
