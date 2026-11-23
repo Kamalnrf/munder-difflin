@@ -12,6 +12,11 @@ name: Quire · Triage an issue
 # (QUIRE_BROWSER_CDP); it never opens the app by URL. See .quire/runbook.md for what Runs
 # may and may not do.
 #
+# The report is untrusted text and Quire can run shell commands, so the Run happens in a
+# job that holds no write-scoped credentials: no persisted git credentials, a read-only
+# job token, and no GitHub token handed to Quire. A separate `report` job does the
+# commenting, and sees only Quire's own handoff.
+#
 # Needs: the QUIRE_API_TOKEN secret. Each triaged issue is one Quire Run.
 
 on:
@@ -27,9 +32,7 @@ on:
         required: false
         default: HarnessMD/munder-difflin
 
-permissions:
-  contents: read
-  issues: write
+permissions: {}
 
 concurrency:
   # Re-triaging an issue replaces the Run still in flight for it.
@@ -40,22 +43,42 @@ jobs:
   triage:
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    permissions:
+      contents: read
+      issues: read
     env:
       QUIRE_BROWSER_CDP: "9222"
       MD_USER_DATA: /tmp/md-userdata
+    outputs:
+      triage: ${{ steps.issue.outputs.triage }}
+      owner: ${{ steps.issue.outputs.owner }}
+      repo: ${{ steps.issue.outputs.repo }}
+      number: ${{ steps.issue.outputs.number }}
+      status: ${{ steps.quire.outputs.status }}
+      passed: ${{ steps.quire.outputs.passed }}
+      failed: ${{ steps.quire.outputs.failed }}
+      blocked: ${{ steps.quire.outputs.blocked }}
+      web-url: ${{ steps.quire.outputs.web-url }}
+      trail-url: ${{ steps.quire.outputs.trail-url }}
     steps:
       - uses: actions/checkout@v6
         with:
           # Quire reads the commits since the Trail's previous Run.
           fetch-depth: 0
+          # Nothing here pushes, and the Run must not inherit a credential it could use.
+          persist-credentials: false
 
       # A Run costs money, so skip what no reproduction attempt can help: bots, and pull
       # requests, which issues.get also returns. Everything a person filed is fair game,
       # including freehand reports that never touched the bug form.
+      #
+      # Reading an issue in another repository needs a token with access to it; the job
+      # token is scoped to this one. This step's token is not visible to later steps.
       - name: Read the issue
         id: issue
         uses: actions/github-script@v7
         with:
+          github-token: ${{ secrets.ISSUE_COMMENT_TOKEN || github.token }}
           script: |
             const inputs = context.payload.inputs || {};
             const target =
@@ -79,7 +102,6 @@ jobs:
                 ...{ owner, repo }, issue_number: number,
               }));
             } catch (error) {
-              // A private or missing upstream issue needs a token with access to it.
               core.setFailed(`Could not read ${target}#${number}: ${error.message}`);
               return;
             }
@@ -145,7 +167,11 @@ jobs:
           exit 1
 
       # A reproduced bug is a finding, not a broken build, so fail-on is empty: the Run
-      # reports and the job stays green. The report step below carries the verdict.
+      # reports and the job stays green. The report job carries the verdict.
+      #
+      # github-token is deliberately empty. The action would default it to the job token
+      # and put it in this step's environment, where an injected instruction could reach
+      # it through Quire's shell tool. Commenting happens in the report job instead.
       - name: "Quire: triage"
         id: quire
         if: steps.issue.outputs.triage == 'true'
@@ -154,8 +180,8 @@ jobs:
           api-token: ${{ secrets.QUIRE_API_TOKEN }}
           trail: ${{ steps.issue.outputs.trail }}
           fail-on: ""
-          # The action's own commenting is pull-request only; the step below reports.
           comment: "false"
+          github-token: ""
           request: |
             Triage this bug report against the Munder Difflin app already running on this
             machine, and record whether it reproduces. Follow .quire/runbook.md for how to
@@ -196,30 +222,71 @@ jobs:
             ${{ steps.issue.outputs.body }}
             --- END REPORT ---
 
-      # The handoff always lands in the job summary. Commenting needs write access to the
-      # issue's own repository, which github.token does not have upstream: set
-      # ISSUE_COMMENT_TOKEN to a PAT that does, or read the summary instead.
-      - name: Report the outcome
-        if: ${{ !cancelled() && steps.quire.outputs.status != '' && steps.quire.outputs.status != 'skipped' }}
-        uses: actions/github-script@v7
+      # Job outputs cannot carry the handoff, so it travels as an artifact.
+      - name: Stage the handoff
+        id: staged
+        if: ${{ !cancelled() && steps.quire.outputs.handoff-path != '' }}
         env:
           HANDOFF: ${{ steps.quire.outputs.handoff-path }}
-          STATUS: ${{ steps.quire.outputs.status }}
-          PASSED: ${{ steps.quire.outputs.passed }}
-          FAILED: ${{ steps.quire.outputs.failed }}
-          BLOCKED: ${{ steps.quire.outputs.blocked }}
-          WEB_URL: ${{ steps.quire.outputs.web-url }}
-          TRAIL_URL: ${{ steps.quire.outputs.trail-url }}
-          OWNER: ${{ steps.issue.outputs.owner }}
-          REPO: ${{ steps.issue.outputs.repo }}
-          NUMBER: ${{ steps.issue.outputs.number }}
+        run: cp "$HANDOFF" "$RUNNER_TEMP/handoff.md"
+
+      - name: Upload the handoff
+        if: ${{ !cancelled() && steps.staged.outcome == 'success' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: quire-handoff
+          path: ${{ runner.temp }}/handoff.md
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: App log
+        if: ${{ failure() && steps.issue.outputs.triage == 'true' }}
+        run: cat "$RUNNER_TEMP/app.log" || true
+
+  # Separate job so the write-scoped token never shares an environment with the Run. It
+  # sees Quire's handoff, not the report text, and runs no agent.
+  report:
+    needs: triage
+    if: ${{ !cancelled() && needs.triage.outputs.triage == 'true' && needs.triage.outputs.status != '' && needs.triage.outputs.status != 'skipped' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      issues: write
+    steps:
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: quire-handoff
+          path: handoff
+
+      - name: Comment the outcome on the issue
+        uses: actions/github-script@v7
+        env:
+          STATUS: ${{ needs.triage.outputs.status }}
+          PASSED: ${{ needs.triage.outputs.passed }}
+          FAILED: ${{ needs.triage.outputs.failed }}
+          BLOCKED: ${{ needs.triage.outputs.blocked }}
+          WEB_URL: ${{ needs.triage.outputs.web-url }}
+          TRAIL_URL: ${{ needs.triage.outputs.trail-url }}
+          OWNER: ${{ needs.triage.outputs.owner }}
+          REPO: ${{ needs.triage.outputs.repo }}
+          NUMBER: ${{ needs.triage.outputs.number }}
         with:
           github-token: ${{ secrets.ISSUE_COMMENT_TOKEN || github.token }}
           script: |
             const fs = require('fs');
             const e = process.env;
             let handoff = '';
-            if (e.HANDOFF && fs.existsSync(e.HANDOFF)) handoff = fs.readFileSync(e.HANDOFF, 'utf8');
+            if (fs.existsSync('handoff/handoff.md')) {
+              handoff = fs.readFileSync('handoff/handoff.md', 'utf8');
+            }
+
+            // Evidence URLs need authentication, so GitHub's anonymous image proxy cannot
+            // render them. Links keep the screenshots reachable for whoever reads this.
+            handoff = handoff.replace(
+              /!\[([^\]]*)\]\(/g, (_, alt) => `[${alt || 'Evidence'}](`,
+            );
+
             // A comment caps at 65536 characters; the Run link holds the full evidence.
             const room = 60000;
             const body = [
@@ -245,7 +312,3 @@ jobs:
                 'The handoff is in this job summary.',
               );
             }
-
-      - name: App log
-        if: ${{ failure() && steps.issue.outputs.triage == 'true' }}
-        run: cat "$RUNNER_TEMP/app.log" || true
