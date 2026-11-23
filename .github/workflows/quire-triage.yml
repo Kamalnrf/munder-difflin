@@ -31,8 +31,13 @@ on:
 permissions: {}
 
 concurrency:
-  # Re-triaging an issue replaces the Run still in flight for it.
-  group: quire-triage-${{ github.event.issue.number || github.event.inputs.issue }}
+  # Applying `quire` again replaces the Run still in flight for that issue. Every other
+  # label fires this workflow too, so those runs need a group of their own: sharing the
+  # per-issue one would cancel a live Run and then skip the job that reports it.
+  group: >-
+    ${{ github.event_name == 'issues' && github.event.label.name != 'quire'
+        && format('quire-triage-ignored-{0}', github.run_id)
+        || format('quire-triage-{0}', github.event.issue.number || github.event.inputs.issue) }}
   cancel-in-progress: true
 
 jobs:
@@ -278,7 +283,23 @@ jobs:
               ...context.repo, issue_number: number, body,
             });
 
-            // The label is a button, not a state: clearing it lets the next apply trigger.
+  # The label is a button, not a state, so it has to clear even when the Run never
+  # produced a verdict: a failed start would otherwise leave `quire` set, and applying a
+  # label that is already there fires nothing. Separate and terminal, so a failure
+  # anywhere above still reaches it, and only the run that the label triggered clears it.
+  clear-label:
+    needs: [triage, report]
+    if: ${{ always() && github.event_name == 'issues' && github.event.label.name == 'quire' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - uses: actions/github-script@v7
+        env:
+          NUMBER: ${{ github.event.issue.number }}
+        with:
+          script: |
             await github.rest.issues.removeLabel({
-              ...context.repo, issue_number: number, name: 'quire',
-            }).catch(() => core.info('No quire label to remove.'));
+              ...context.repo, issue_number: Number(process.env.NUMBER), name: 'quire',
+            }).catch((error) => core.info(`No quire label to remove: ${error.message}`));
