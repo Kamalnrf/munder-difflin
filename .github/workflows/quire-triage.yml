@@ -264,18 +264,46 @@ jobs:
               /!\[([^\]]*)\]\(/g, (_, alt) => `[${alt || 'Evidence'}](`,
             );
 
+            // The handoff opens with an h1 and a summary paragraph, then a state diagram,
+            // the checks table and its evidence. Posted whole it buries the verdict under
+            // a rendered diagram, so only the headline and that paragraph stay in view.
+            const lines = handoff.split('\n');
+            const titleAt = lines.findIndex((l) => /^#\s+/.test(l));
+            const title = titleAt >= 0 ? lines[titleAt].replace(/^#\s+/, '').trim() : '';
+            let cursor = titleAt + 1;
+            const summary = [];
+            while (cursor < lines.length) {
+              if (!lines[cursor].trim()) {
+                if (summary.length) break;
+                cursor += 1;
+                continue;
+              }
+              summary.push(lines[cursor].trim());
+              cursor += 1;
+            }
+            // Headings drop two levels so the folded detail cannot outshout the verdict.
+            const rest = lines.slice(cursor).join('\n').trim()
+              .replace(/^(#{1,4})\s/gm, (_, h) => `${'#'.repeat(Math.min(6, h.length + 2))} `);
+
             // A comment caps at 65536 characters; the Run link holds the full evidence.
-            const room = 60000;
+            const room = 55000;
             const body = [
-              '## Quire triage',
-              '',
               e.STATUS === 'completed'
-                ? `${e.PASSED} passed · ${e.FAILED} failed · ${e.BLOCKED} blocked`
-                : `Run did not complete (\`${e.STATUS}\`).`,
+                ? `**Quire triage** · ${e.PASSED} passed · ${e.FAILED} failed · ${e.BLOCKED} blocked · [Run](${e.WEB_URL}) · [Trail](${e.TRAIL_URL})`
+                : `**Quire triage** · Run did not complete (\`${e.STATUS}\`) · [Run](${e.WEB_URL})`,
+              ...(title ? ['', `**${title}** — ${summary.join(' ')}`] : []),
+              ...(rest ? [
+                '',
+                '<details><summary>Checks, evidence and how it was set up</summary>',
+                '',
+                rest.length > room
+                  ? `${rest.slice(0, room)}\n\n…truncated; the Run has the rest.`
+                  : rest,
+                '',
+                '</details>',
+              ] : []),
               '',
-              handoff.length > room ? handoff.slice(0, room) + '\n\n…truncated.' : handoff,
-              '',
-              `[Run](${e.WEB_URL}) · [Trail](${e.TRAIL_URL}) · apply \`quire\` to run again`,
+              '_Apply `quire` to run again._',
             ].join('\n');
 
             await core.summary.addRaw(body).write();
